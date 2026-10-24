@@ -1,0 +1,57 @@
+const CORS_HEADERS = {
+ "Access-Control-Allow-Origin": "*",
+ "Access-Control-Allow-Methods": "POST, OPTIONS",
+ "Access-Control-Allow-Headers": "Content-Type"
+};
+
+function json(data,status=200){return new Response(JSON.stringify(data),{status,headers:{"Content-Type":"application/json; charset=utf-8",...CORS_HEADERS}})}
+
+export default {
+ async fetch(request, env) {
+  const url=new URL(request.url);
+  if(request.method==="OPTIONS")return new Response(null,{status:204,headers:CORS_HEADERS});
+  if(url.pathname==="/" && request.method==="GET")return new Response("PC3000 AI backend aktif. Endpoint diagnosis: POST /api/diagnose",{headers:{"Content-Type":"text/plain; charset=utf-8"}});
+  if(url.pathname!=="/api/diagnose")return json({error:"Endpoint tidak ditemukan"},404);
+  if(request.method!=="POST")return json({error:"Gunakan POST"},405);
+  if(!env.OPENAI_API_KEY)return json({error:"OPENAI_API_KEY belum diatur di secrets backend"},500);
+  try{
+   const body=await request.json();
+   const allowed=["system","unit","symptom","conditions","codes","measurements","work","question"];
+   const clean={};
+   for(const key of allowed)clean[key]=String(body[key]||"").slice(0,5000);
+   if(!clean.symptom.trim())return json({error:"Gejala wajib diisi"},400);
+   const instructions=`Anda adalah asisten troubleshooting teknis untuk Komatsu PC3000-6E, membantu mekanik di Indonesia. Jawab dalam Bahasa Indonesia yang jelas dan sistematis.
+Aturan wajib:
+- Bedakan fakta dari dugaan. Jangan mengarang nilai tekanan, tegangan, nomor pin, spesifikasi, prosedur, atau nomor halaman manual.
+- Jika file_search memberi sumber manual, prioritaskan sumber itu dan sebutkan nama file/halaman bila tersedia. Jika tidak ada dukungan sumber, katakan bahwa manual perlu diverifikasi.
+- Susun jawaban: (1) ringkasan masalah, (2) kemungkinan penyebab berurutan dan alasan, (3) pemeriksaan berikutnya dari yang aman/mudah ke yang lebih kompleks, (4) titik ukur dan kondisi ukur hanya jika dapat dipastikan, (5) interpretasi hasil yang mungkin, (6) data tambahan yang dibutuhkan.
+- Jangan menyarankan bypass interlock, menghidupkan mesin saat orang berada di area bahaya, membuka sistem hidrolik bertekanan, atau bekerja tanpa LOTOTO. Minta teknisi mengikuti prosedur site dan manual resmi.
+- Jangan menyatakan diagnosis final hanya dari gejala. Jika informasi kurang, ajukan pertanyaan yang paling penting.
+- Bukan pengganti manual resmi atau teknisi berwenang.`;
+   const userInput=`Analisis kasus PC3000-6E berikut:
+Sistem: ${clean.system}
+Unit: ${clean.unit||"belum diisi"}
+Gejala: ${clean.symptom}
+Kondisi saat terjadi: ${clean.conditions||"belum diketahui"}
+Kode alarm: ${clean.codes||"tidak dicantumkan"}
+Hasil pengukuran: ${clean.measurements||"belum tersedia"}
+Pekerjaan terakhir: ${clean.work||"belum dicantumkan"}
+Pertanyaan khusus: ${clean.question||"buat urutan pemeriksaan awal yang aman"}`;
+   const payload={model:env.OPENAI_MODEL||"gpt-4.1-mini",instructions,input:userInput};
+   const manualEnabled=Boolean(env.VECTOR_STORE_ID);
+   if(manualEnabled)payload.tools=[{type:"file_search",vector_store_ids:[env.VECTOR_STORE_ID]}];
+   const resp=await fetch("https://api.openai.com/v1/responses",{
+    method:"POST",
+    headers:{"Authorization":`Bearer ${env.OPENAI_API_KEY}`,"Content-Type":"application/json"},
+    body:JSON.stringify(payload)
+   });
+   const result=await resp.json();
+   if(!resp.ok)return json({error:result?.error?.message||`OpenAI API error (${resp.status})`},502);
+   let answer="";
+   for(const item of (result.output||[])){
+    if(item.type==="message")for(const c of (item.content||[]))if(c.type==="output_text")answer+=c.text;
+   }
+   return json({answer:answer||"Respons kosong dari AI.",manualEnabled});
+  }catch(e){return json({error:"Permintaan gagal diproses. Periksa konfigurasi backend dan koneksi."},500)}
+ }
+};
